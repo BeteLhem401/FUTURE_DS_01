@@ -1,6 +1,6 @@
-
---  CREATE DATABASE AND LOAD RAW DATA
-
+-- ======================================================
+-- STEP 1: CREATE DATABASE AND LOAD RAW DATA
+-- ======================================================
 -- Initialize the database and create the raw table.
 -- Load unprocessed transactional data from the CSV file.
 -- All columns are imported exactly as in the source file.
@@ -54,8 +54,9 @@ SET
 -- Create a backup copy of the raw data for safety.
 CREATE TABLE superstore_backup AS SELECT * FROM superstore_raw;
 
---  DATA CLEANING
-
+-- ======================================================
+-- STEP 2: DATA CLEANING
+-- ======================================================
 -- Remove invalid records, including missing or negative numeric values.
 -- Ensure all sales and quantity values are logical for analysis.
 
@@ -74,9 +75,9 @@ WHERE Sales IS NOT NULL
 DELETE FROM superstore_clean
 WHERE Profit < 0 AND (Sales < 0 OR Quantity < 0);
 
-
---  BUILD THE FINAL FACT TABLE
-
+-- ======================================================
+-- STEP 3: BUILD THE FINAL FACT TABLE
+-- ======================================================
 -- Aggregate data by Order_ID and Product_ID.
 -- This table serves as the central fact table for analytics.
 
@@ -112,8 +113,10 @@ CREATE INDEX idx_orderdate ON superstore_final (Order_Date);
 CREATE INDEX idx_customer ON superstore_final (Customer_ID);
 CREATE INDEX idx_region ON superstore_final (Region);
 
-
---  FEATURE ENGINEERING
+-- ======================================================
+-- STEP 4: FEATURE ENGINEERING
+-- ======================================================
+-- Create additional calculated fields to support analysis:
 -- - Order_Year: year of the order
 -- - Order_Month: year-month of the order
 -- - AvgPricePerUnit: average price per unit sold
@@ -129,9 +132,9 @@ SET
   Order_Month = DATE_FORMAT(Order_Date, '%Y-%m'),
   AvgPricePerUnit = CASE WHEN Quantity > 0 THEN Sales / Quantity ELSE NULL END;
 
-
--- ANALYTICAL INSIGHT TABLES
-
+-- ======================================================
+-- STEP 5: ANALYTICAL INSIGHT TABLES
+-- ======================================================
 -- Create supporting tables for dashboards and deeper analytics.
 
 -- ---------- Category Performance ----------
@@ -244,8 +247,11 @@ SELECT
 FROM superstore_final
 GROUP BY Order_Month;
 
+-- ======================================================
+-- STEP 6: PRIMARY KEYS & RELATIONSHIPS FOR POWER BI
+-- ======================================================
+-- Add primary keys and foreign key constraints to build a proper star schema.
 
---  PRIMARY KEYS & RELATIONSHIPS FOR POWER BI
 -- FACT TABLE UNIQUE KEY
 ALTER TABLE superstore_final ADD COLUMN Fact_ID VARCHAR(50);
 UPDATE superstore_final SET Fact_ID = CONCAT(Order_ID, '_', Product_ID);
@@ -283,3 +289,8 @@ ADD CONSTRAINT fk_fact_customer FOREIGN KEY (Customer_ID)
 ALTER TABLE superstore_final
 ADD CONSTRAINT fk_fact_product FOREIGN KEY (Product_ID)
   REFERENCES insight_product_performance (Product_ID);
+
+-- ======================================================
+-- ✅ COMPLETED
+-- ======================================================
+SELECT '✅ Superstore BI Model Created Successfully — Ready for Power BI!' AS status_message;

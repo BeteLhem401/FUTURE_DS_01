@@ -1,10 +1,6 @@
-
---  CREATE DATABASE AND LOAD RAW DATA
-
--- Initialize the database and create the raw table.
--- Load unprocessed transactional data from the CSV file.
--- All columns are imported exactly as in the source file.
-
+-- ======================================================
+-- STEP 1: DATABASE AND RAW DATA LOAD
+-- ======================================================
 CREATE DATABASE IF NOT EXISTS superstore_db;
 USE superstore_db;
 
@@ -34,7 +30,6 @@ CREATE TABLE superstore_raw (
     Profit DECIMAL(10,2)
 );
 
--- Load CSV data into the raw table with proper date conversion.
 LOAD DATA INFILE 'C:/ProgramData/MySQL/MySQL Server 8.0/Uploads/superstore_orders.csv'
 INTO TABLE superstore_raw
 FIELDS TERMINATED BY ',' 
@@ -51,14 +46,12 @@ SET
     Order_Date = STR_TO_DATE(@Order_Date, '%m/%d/%Y'),
     Ship_Date  = STR_TO_DATE(@Ship_Date, '%m/%d/%Y');
 
--- Create a backup copy of the raw data for safety.
+
 CREATE TABLE superstore_backup AS SELECT * FROM superstore_raw;
 
---  DATA CLEANING
-
--- Remove invalid records, including missing or negative numeric values.
--- Ensure all sales and quantity values are logical for analysis.
-
+-- ======================================================
+-- STEP 2: DATA CLEANING
+-- ======================================================
 DROP TABLE IF EXISTS superstore_clean;
 
 CREATE TABLE superstore_clean AS
@@ -70,16 +63,12 @@ WHERE Sales IS NOT NULL
   AND Sales >= 0
   AND Quantity > 0;
 
--- Remove rows with logically inconsistent negative values.
 DELETE FROM superstore_clean
 WHERE Profit < 0 AND (Sales < 0 OR Quantity < 0);
 
-
---  BUILD THE FINAL FACT TABLE
-
--- Aggregate data by Order_ID and Product_ID.
--- This table serves as the central fact table for analytics.
-
+-- ======================================================
+-- STEP 3: FINAL FACT TABLE
+-- ======================================================
 DROP TABLE IF EXISTS superstore_final;
 
 CREATE TABLE superstore_final AS
@@ -106,18 +95,15 @@ SELECT
 FROM superstore_clean
 GROUP BY Order_ID, Product_ID;
 
--- Add indexes to improve query performance.
+-- Add useful indexes
 CREATE INDEX idx_order_product ON superstore_final (Order_ID, Product_ID);
 CREATE INDEX idx_orderdate ON superstore_final (Order_Date);
 CREATE INDEX idx_customer ON superstore_final (Customer_ID);
 CREATE INDEX idx_region ON superstore_final (Region);
 
-
---  FEATURE ENGINEERING
--- - Order_Year: year of the order
--- - Order_Month: year-month of the order
--- - AvgPricePerUnit: average price per unit sold
-
+-- ======================================================
+-- STEP 4: FEATURE ENGINEERING
+-- ======================================================
 ALTER TABLE superstore_final
   ADD COLUMN Order_Year INT,
   ADD COLUMN Order_Month VARCHAR(7),
@@ -129,12 +115,11 @@ SET
   Order_Month = DATE_FORMAT(Order_Date, '%Y-%m'),
   AvgPricePerUnit = CASE WHEN Quantity > 0 THEN Sales / Quantity ELSE NULL END;
 
+-- ======================================================
+-- STEP 5: INSIGHT TABLES
+-- ======================================================
 
--- ANALYTICAL INSIGHT TABLES
-
--- Create supporting tables for dashboards and deeper analytics.
-
--- ---------- Category Performance ----------
+-- CATEGORY PERFORMANCE
 DROP TABLE IF EXISTS insight_category_performance;
 CREATE TABLE insight_category_performance AS
 SELECT 
@@ -145,7 +130,7 @@ SELECT
 FROM superstore_final
 GROUP BY Category;
 
--- ---------- Region Performance ----------
+-- REGION PERFORMANCE
 DROP TABLE IF EXISTS insight_region_performance;
 CREATE TABLE insight_region_performance AS
 SELECT
@@ -157,7 +142,7 @@ SELECT
 FROM superstore_final
 GROUP BY Region;
 
--- ---------- Customer Lifetime Value (RFM Model) ----------
+-- CUSTOMER VALUE (RFM)
 DROP TABLE IF EXISTS insight_customer_value;
 CREATE TABLE insight_customer_value AS
 WITH customer_stats AS (
@@ -204,7 +189,7 @@ SELECT
 FROM customer_stats cs
 JOIN rfm r USING (Customer_ID);
 
--- ---------- Product Performance ----------
+-- PRODUCT PERFORMANCE
 DROP TABLE IF EXISTS insight_product_performance;
 CREATE TABLE insight_product_performance AS
 WITH product_stats AS (
@@ -232,7 +217,7 @@ SELECT
     ROUND(total_sales/NULLIF(total_quantity,0),2) AS avg_price_per_unit
 FROM product_stats;
 
--- ---------- Monthly Sales Growth ----------
+-- MONTHLY GROWTH
 DROP TABLE IF EXISTS insight_monthly_growth;
 CREATE TABLE insight_monthly_growth AS
 SELECT
@@ -244,8 +229,10 @@ SELECT
 FROM superstore_final
 GROUP BY Order_Month;
 
+-- ======================================================
+-- STEP 6: PRIMARY KEYS & RELATIONSHIPS FOR POWER BI
+-- ======================================================
 
---  PRIMARY KEYS & RELATIONSHIPS FOR POWER BI
 -- FACT TABLE UNIQUE KEY
 ALTER TABLE superstore_final ADD COLUMN Fact_ID VARCHAR(50);
 UPDATE superstore_final SET Fact_ID = CONCAT(Order_ID, '_', Product_ID);
@@ -254,8 +241,7 @@ ALTER TABLE superstore_final ADD PRIMARY KEY (Fact_ID);
 -- CUSTOMER DIMENSION KEY
 ALTER TABLE insight_customer_value ADD PRIMARY KEY (Customer_ID);
 
--- PRODUCT DIMENSION KEY
--- Ensure uniqueness before adding primary key
+-- PRODUCT DIMENSION KEY (ensure unique)
 CREATE TEMPORARY TABLE tmp_products AS
 SELECT 
     Product_ID,
@@ -272,14 +258,19 @@ DROP TEMPORARY TABLE tmp_products;
 
 ALTER TABLE insight_product_performance ADD PRIMARY KEY (Product_ID);
 
--- REGION DIMENSION KEY
+-- REGION TABLE KEY
 ALTER TABLE insight_region_performance ADD PRIMARY KEY (Region);
 
--- ESTABLISH FACT–DIMENSION RELATIONSHIPS
+-- ADD FOREIGN KEYS
 ALTER TABLE superstore_final
 ADD CONSTRAINT fk_fact_customer FOREIGN KEY (Customer_ID)
-  REFERENCES insight_customer_value (Customer_ID);
+REFERENCES insight_customer_value (Customer_ID);
 
 ALTER TABLE superstore_final
 ADD CONSTRAINT fk_fact_product FOREIGN KEY (Product_ID)
-  REFERENCES insight_product_performance (Product_ID);
+REFERENCES insight_product_performance (Product_ID);
+
+-- ======================================================
+-- ✅ COMPLETED
+-- ======================================================
+SELECT '✅ Superstore BI Model Created Successfully — Ready for Power BI!' AS status_message;
