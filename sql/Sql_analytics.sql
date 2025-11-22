@@ -1,296 +1,230 @@
--- ======================================================
--- STEP 1: CREATE DATABASE AND LOAD RAW DATA
--- ======================================================
--- Initialize the database and create the raw table.
--- Load unprocessed transactional data from the CSV file.
--- All columns are imported exactly as in the source file.
+-- superstore_star_schema.sql
 
-CREATE DATABASE IF NOT EXISTS superstore_db;
+SET FOREIGN_KEY_CHECKS = 0;
+
+-- 0. Create database and switch
+
+CREATE DATABASE IF NOT EXISTS superstore_db CHARACTER SET = 'utf8mb4' COLLATE = 'utf8mb4_unicode_ci';
 USE superstore_db;
 
-DROP TABLE IF EXISTS superstore_raw;
 
-CREATE TABLE superstore_raw (
+-- 1. Raw table (exact import of CSV)
+
+DROP TABLE IF EXISTS raw_orders;
+CREATE TABLE raw_orders (
     Row_ID INT,
-    Order_ID VARCHAR(20),
+    Order_ID VARCHAR(50),
     Order_Date DATE,
     Ship_Date DATE,
-    Ship_Mode VARCHAR(50),
-    Customer_ID VARCHAR(20),
-    Customer_Name VARCHAR(100),
-    Segment VARCHAR(50),
-    Country VARCHAR(50),
-    City VARCHAR(50),
-    State VARCHAR(50),
-    Postal_Code VARCHAR(20),
-    Region VARCHAR(50),
-    Product_ID VARCHAR(50),
-    Category VARCHAR(50),
-    Sub_Category VARCHAR(50),
+    Ship_Mode VARCHAR(100),
+    Customer_ID VARCHAR(50),
+    Customer_Name VARCHAR(200),
+    Segment VARCHAR(100),
+    Country VARCHAR(100),
+    City VARCHAR(100),
+    State VARCHAR(100),
+    Postal_Code VARCHAR(50),
+    Region VARCHAR(100),
+    Product_ID VARCHAR(100),
+    Category VARCHAR(100),
+    Sub_Category VARCHAR(100),
     Product_Name TEXT,
-    Sales DECIMAL(10,2),
+    Sales DECIMAL(18,2),
     Quantity INT,
-    Discount DECIMAL(5,2),
-    Profit DECIMAL(10,2)
-);
+    Discount DECIMAL(6,4),
+    Profit DECIMAL(18,2)
+) ENGINE=InnoDB;
 
--- Load CSV data into the raw table with proper date conversion.
+
 LOAD DATA INFILE 'C:/ProgramData/MySQL/MySQL Server 8.0/Uploads/superstore_orders.csv'
-INTO TABLE superstore_raw
-FIELDS TERMINATED BY ',' 
-ENCLOSED BY '"' 
+INTO TABLE raw_orders
+FIELDS TERMINATED BY ','
+OPTIONALLY ENCLOSED BY '"'
 LINES TERMINATED BY '\n'
 IGNORE 1 ROWS
-(
-    Row_ID, Order_ID, @Order_Date, @Ship_Date, Ship_Mode,
-    Customer_ID, Customer_Name, Segment, Country, City,
-    State, Postal_Code, Region, Product_ID, Category,
-    Sub_Category, Product_Name, Sales, Quantity, Discount, Profit
-)
+(Row_ID, Order_ID, @Order_Date, @Ship_Date, Ship_Mode,
+ Customer_ID, Customer_Name, Segment, Country, City,
+ State, Postal_Code, Region, Product_ID, Category,
+ Sub_Category, Product_Name, Sales, Quantity, Discount, Profit)
 SET
-    Order_Date = STR_TO_DATE(@Order_Date, '%m/%d/%Y'),
-    Ship_Date  = STR_TO_DATE(@Ship_Date, '%m/%d/%Y');
+  Order_Date = STR_TO_DATE(@Order_Date, '%m/%d/%Y'),
+  Ship_Date = STR_TO_DATE(@Ship_Date, '%m/%d/%Y');
 
--- Create a backup copy of the raw data for safety.
-CREATE TABLE superstore_backup AS SELECT * FROM superstore_raw;
+-- Backup raw data 
+DROP TABLE IF EXISTS raw_orders_backup;
+CREATE TABLE raw_orders_backup AS SELECT * FROM raw_orders;
 
--- ======================================================
--- STEP 2: DATA CLEANING
--- ======================================================
--- Remove invalid records, including missing or negative numeric values.
--- Ensure all sales and quantity values are logical for analysis.
 
-DROP TABLE IF EXISTS superstore_clean;
+-- 2. Cleaning step
+--    - Remove rows with null critical fields
+--    - Standardize negative/zero values
 
-CREATE TABLE superstore_clean AS
+DROP TABLE IF EXISTS clean_orders;
+CREATE TABLE clean_orders AS
 SELECT *
-FROM superstore_raw
-WHERE Sales IS NOT NULL
+FROM raw_orders
+WHERE Order_ID IS NOT NULL
+  AND Product_ID IS NOT NULL
+  AND Customer_ID IS NOT NULL
+  AND Order_Date IS NOT NULL
+  AND Sales IS NOT NULL
   AND Quantity IS NOT NULL
   AND Profit IS NOT NULL
   AND Sales >= 0
-  AND Quantity > 0;
+  AND Quantity >= 0;
 
--- Remove rows with logically inconsistent negative values.
-DELETE FROM superstore_clean
-WHERE Profit < 0 AND (Sales < 0 OR Quantity < 0);
+-- Remove rows zero quantity with positive sales)
+DELETE FROM clean_orders WHERE Quantity = 0 AND Sales > 0;
 
--- ======================================================
--- STEP 3: BUILD THE FINAL FACT TABLE
--- ======================================================
--- Aggregate data by Order_ID and Product_ID.
--- This table serves as the central fact table for analytics.
+-- -----------------------------
+-- 3. Create dimension tables
+-- Customer dimension
+DROP TABLE IF EXISTS dim_customer;
+CREATE TABLE dim_customer AS
+SELECT DISTINCT
+  Customer_ID,
+  TRIM(Customer_Name) AS CustomerName,
+  Segment
+FROM clean_orders;
+ALTER TABLE dim_customer
+  ADD PRIMARY KEY (Customer_ID);
 
-DROP TABLE IF EXISTS superstore_final;
+-- Product dimension
+DROP TABLE IF EXISTS dim_product;
 
-CREATE TABLE superstore_final AS
-SELECT 
-    Order_ID,
-    Product_ID,
-    MAX(Order_Date) AS Order_Date,
-    MAX(Ship_Date) AS Ship_Date,
-    MAX(Customer_ID) AS Customer_ID,
-    MAX(Customer_Name) AS Customer_Name,
-    MAX(Segment) AS Segment,
-    MAX(Country) AS Country,
-    MAX(City) AS City,
-    MAX(State) AS State,
-    MAX(Postal_Code) AS Postal_Code,
-    MAX(Region) AS Region,
-    MAX(Product_Name) AS Product_Name,
-    MAX(Category) AS Category,
-    MAX(Sub_Category) AS Sub_Category,
-    SUM(Sales) AS Sales,
-    SUM(Quantity) AS Quantity,
-    ROUND(AVG(Discount),2) AS Discount,
-    SUM(Profit) AS Profit
-FROM superstore_clean
-GROUP BY Order_ID, Product_ID;
-
--- Add indexes to improve query performance.
-CREATE INDEX idx_order_product ON superstore_final (Order_ID, Product_ID);
-CREATE INDEX idx_orderdate ON superstore_final (Order_Date);
-CREATE INDEX idx_customer ON superstore_final (Customer_ID);
-CREATE INDEX idx_region ON superstore_final (Region);
-
--- ======================================================
--- STEP 4: FEATURE ENGINEERING
--- ======================================================
--- Create additional calculated fields to support analysis:
--- - Order_Year: year of the order
--- - Order_Month: year-month of the order
--- - AvgPricePerUnit: average price per unit sold
-
-ALTER TABLE superstore_final
-  ADD COLUMN Order_Year INT,
-  ADD COLUMN Order_Month VARCHAR(7),
-  ADD COLUMN AvgPricePerUnit DECIMAL(10,2);
-
-UPDATE superstore_final
-SET 
-  Order_Year = YEAR(Order_Date),
-  Order_Month = DATE_FORMAT(Order_Date, '%Y-%m'),
-  AvgPricePerUnit = CASE WHEN Quantity > 0 THEN Sales / Quantity ELSE NULL END;
-
--- ======================================================
--- STEP 5: ANALYTICAL INSIGHT TABLES
--- ======================================================
--- Create supporting tables for dashboards and deeper analytics.
-
--- ---------- Category Performance ----------
-DROP TABLE IF EXISTS insight_category_performance;
-CREATE TABLE insight_category_performance AS
-SELECT 
-  Category,
-  ROUND(SUM(Sales),2) AS total_sales,
-  ROUND(SUM(Profit),2) AS total_profit,
-  ROUND(SUM(Profit)/NULLIF(SUM(Sales),0)*100,2) AS profit_margin
-FROM superstore_final
-GROUP BY Category;
-
--- ---------- Region Performance ----------
-DROP TABLE IF EXISTS insight_region_performance;
-CREATE TABLE insight_region_performance AS
-SELECT
-  Region,
-  COUNT(DISTINCT Customer_ID) AS total_customers,
-  SUM(Sales) AS total_sales,
-  SUM(Profit) AS total_profit,
-  ROUND(SUM(Profit)/NULLIF(SUM(Sales),0)*100,2) AS profit_margin
-FROM superstore_final
-GROUP BY Region;
-
--- ---------- Customer Lifetime Value (RFM Model) ----------
-DROP TABLE IF EXISTS insight_customer_value;
-CREATE TABLE insight_customer_value AS
-WITH customer_stats AS (
-    SELECT
-        Customer_ID,
-        Customer_Name,
-        Segment,
-        MIN(Order_Date) AS first_purchase,
-        MAX(Order_Date) AS last_purchase,
-        COUNT(DISTINCT Order_ID) AS total_orders,
-        SUM(Sales) AS total_sales,
-        SUM(Profit) AS total_profit,
-        SUM(Quantity) AS total_quantity
-    FROM superstore_final
-    GROUP BY Customer_ID, Customer_Name, Segment
-),
-rfm AS (
-    SELECT
-        cs.Customer_ID,
-        DATEDIFF((SELECT MAX(Order_Date) FROM superstore_final), cs.last_purchase) AS recency_days,
-        cs.total_orders AS frequency,
-        cs.total_sales AS monetary
-    FROM customer_stats cs
-)
-SELECT
-    cs.Customer_ID,
-    cs.Customer_Name,
-    cs.Segment,
-    cs.first_purchase,
-    cs.last_purchase,
-    DATEDIFF(cs.last_purchase, cs.first_purchase) AS active_days,
-    cs.total_orders,
-    cs.total_sales,
-    cs.total_profit,
-    cs.total_quantity,
-    ROUND(cs.total_sales / NULLIF(cs.total_orders,0),2) AS avg_order_value,
-    ROUND(cs.total_profit / NULLIF(cs.total_orders,0),2) AS avg_profit_per_order,
-    r.recency_days,
-    r.frequency,
-    r.monetary,
-    NTILE(5) OVER (ORDER BY r.recency_days ASC) AS recency_score,
-    NTILE(5) OVER (ORDER BY r.frequency DESC) AS frequency_score,
-    NTILE(5) OVER (ORDER BY r.monetary DESC) AS monetary_score
-FROM customer_stats cs
-JOIN rfm r USING (Customer_ID);
-
--- ---------- Product Performance ----------
-DROP TABLE IF EXISTS insight_product_performance;
-CREATE TABLE insight_product_performance AS
-WITH product_stats AS (
-    SELECT
-        Product_ID,
-        Product_Name,
-        Category,
-        Sub_Category,
-        SUM(Sales) AS total_sales,
-        SUM(Profit) AS total_profit,
-        SUM(Quantity) AS total_quantity,
-        COUNT(DISTINCT Order_ID) AS total_orders
-    FROM superstore_final
-    GROUP BY Product_ID, Product_Name, Category, Sub_Category
-)
+CREATE TABLE dim_product AS
 SELECT
     Product_ID,
-    Product_Name,
-    Category,
-    Sub_Category,
-    total_sales,
-    total_profit,
-    ROUND(total_profit/NULLIF(total_sales,0)*100,2) AS profit_margin,
-    total_orders,
-    ROUND(total_sales/NULLIF(total_quantity,0),2) AS avg_price_per_unit
-FROM product_stats;
-
--- ---------- Monthly Sales Growth ----------
-DROP TABLE IF EXISTS insight_monthly_growth;
-CREATE TABLE insight_monthly_growth AS
-SELECT
-  Order_Month,
-  SUM(Sales) AS total_sales,
-  LAG(SUM(Sales)) OVER (ORDER BY Order_Month) AS prev_month_sales,
-  ROUND(((SUM(Sales) - LAG(SUM(Sales)) OVER (ORDER BY Order_Month))
-         / NULLIF(LAG(SUM(Sales)) OVER (ORDER BY Order_Month),0))*100,2) AS monthly_growth_pct
-FROM superstore_final
-GROUP BY Order_Month;
-
--- ======================================================
--- STEP 6: PRIMARY KEYS & RELATIONSHIPS FOR POWER BI
--- ======================================================
--- Add primary keys and foreign key constraints to build a proper star schema.
-
--- FACT TABLE UNIQUE KEY
-ALTER TABLE superstore_final ADD COLUMN Fact_ID VARCHAR(50);
-UPDATE superstore_final SET Fact_ID = CONCAT(Order_ID, '_', Product_ID);
-ALTER TABLE superstore_final ADD PRIMARY KEY (Fact_ID);
-
--- CUSTOMER DIMENSION KEY
-ALTER TABLE insight_customer_value ADD PRIMARY KEY (Customer_ID);
-
--- PRODUCT DIMENSION KEY
--- Ensure uniqueness before adding primary key
-CREATE TEMPORARY TABLE tmp_products AS
-SELECT 
-    Product_ID,
-    MAX(Product_Name) AS Product_Name,
-    MAX(Category) AS Category,
-    MAX(Sub_Category) AS Sub_Category
-FROM insight_product_performance
+    ANY_VALUE(Product_Name) AS ProductName,
+    ANY_VALUE(Category) AS Category,
+    ANY_VALUE(Sub_Category) AS SubCategory
+FROM clean_orders
 GROUP BY Product_ID;
 
-TRUNCATE TABLE insight_product_performance;
-INSERT INTO insight_product_performance (Product_ID, Product_Name, Category, Sub_Category)
-SELECT Product_ID, Product_Name, Category, Sub_Category FROM tmp_products;
-DROP TEMPORARY TABLE tmp_products;
+ALTER TABLE dim_product
+ADD PRIMARY KEY (Product_ID);
 
-ALTER TABLE insight_product_performance ADD PRIMARY KEY (Product_ID);
+-- Region dimension
+DROP TABLE IF EXISTS dim_region;
+CREATE TABLE dim_region AS
+SELECT DISTINCT
+  Region
+FROM clean_orders;
+ALTER TABLE dim_region
+  ADD PRIMARY KEY (Region);
 
--- REGION DIMENSION KEY
-ALTER TABLE insight_region_performance ADD PRIMARY KEY (Region);
+-- Calendar dimension
+DROP TABLE IF EXISTS dim_calendar;
+CREATE TABLE dim_calendar AS
+SELECT DISTINCT
+  DATE(Order_Date) AS DateValue,
+  YEAR(Order_Date) AS YearNumber,
+  MONTH(Order_Date) AS MonthNumber,
+  DATE_FORMAT(Order_Date, '%b') AS MonthName,
+  DATE_FORMAT(Order_Date, '%Y-%m') AS YearMonth,
+  DAYOFWEEK(Order_Date) AS WeekdayNumber
+FROM clean_orders
+WHERE Order_Date IS NOT NULL
+ORDER BY DateValue;
+ALTER TABLE dim_calendar
+  ADD PRIMARY KEY (DateValue);
+  
+-- 4. Fact table (aggregated to one row per Order + Product)
 
--- ESTABLISH FACT–DIMENSION RELATIONSHIPS
-ALTER TABLE superstore_final
-ADD CONSTRAINT fk_fact_customer FOREIGN KEY (Customer_ID)
-  REFERENCES insight_customer_value (Customer_ID);
+DROP TABLE IF EXISTS fact_orders;
+CREATE TABLE fact_orders AS
+SELECT
+  CONCAT(Order_ID, '_', Product_ID) AS OrderLineID,
+  Order_ID,
+  Product_ID,
+  DATE(Order_Date) AS OrderDate,
+  Customer_ID,
+  Region,
+  SUM(Sales) AS Sales,
+  SUM(Quantity) AS Quantity,
+  ROUND(SUM(Profit),2) AS Profit
+FROM clean_orders
+GROUP BY Order_ID, Product_ID, Customer_ID, Region, DATE(Order_Date);
 
-ALTER TABLE superstore_final
-ADD CONSTRAINT fk_fact_product FOREIGN KEY (Product_ID)
-  REFERENCES insight_product_performance (Product_ID);
+-- Add primary key now that duplicates are aggregated
+ALTER TABLE fact_orders
+  ADD PRIMARY KEY (OrderLineID);
 
--- ======================================================
--- ✅ COMPLETED
--- ======================================================
-SELECT '✅ Superstore BI Model Created Successfully — Ready for Power BI!' AS status_message;
+-- Add helpful indexes
+
+ALTER TABLE fact_orders
+  ADD INDEX idx_fact_orderdate (OrderDate),
+  ADD INDEX idx_fact_customer (Customer_ID),
+  ADD INDEX idx_fact_product (Product_ID),
+  ADD INDEX idx_fact_region (Region);
+
+-- 5. Referential integrity 
+
+ALTER TABLE fact_orders
+  ADD CONSTRAINT fk_fact_customer FOREIGN KEY (Customer_ID)
+  REFERENCES dim_customer (Customer_ID)
+  ON UPDATE CASCADE
+  ON DELETE SET NULL;
+
+-- Add FK from fact -> product
+
+ALTER TABLE fact_orders
+  ADD CONSTRAINT fk_fact_product FOREIGN KEY (Product_ID)
+  REFERENCES dim_product (Product_ID)
+  ON UPDATE CASCADE
+  ON DELETE SET NULL;
+
+-- Add FK from fact -> region
+-- Region may contain NULLs; keep ON DELETE SET NULL behavior
+
+ALTER TABLE fact_orders
+  ADD CONSTRAINT fk_fact_region FOREIGN KEY (Region)
+  REFERENCES dim_region (Region)
+  ON UPDATE CASCADE
+  ON DELETE SET NULL;
+
+-- Add FK from fact -> calendar (OrderDate -> DateValue)
+-- To enable, create an indexed date column on dim_calendar with same type
+
+ALTER TABLE dim_calendar
+  ADD INDEX idx_calendar_date (DateValue);
+
+ALTER TABLE fact_orders
+  ADD CONSTRAINT fk_fact_calendar FOREIGN KEY (OrderDate)
+  REFERENCES dim_calendar (DateValue)
+  ON UPDATE CASCADE
+  ON DELETE SET NULL;
+
+-- 6. Example views for Power BI (thin semantic layer)
+
+DROP VIEW IF EXISTS vw_fact_orders_with_dims;
+CREATE VIEW vw_fact_orders_with_dims AS
+SELECT
+  f.OrderLineID,
+  f.Order_ID,
+  f.Product_ID,
+  p.ProductName,
+  p.Category,
+  p.SubCategory,
+  f.OrderDate,
+  f.Customer_ID,
+  c.CustomerName,
+  c.Segment,
+  f.Region,
+  f.Sales,
+  f.Quantity,
+  f.Profit
+FROM fact_orders f
+LEFT JOIN dim_product p ON f.Product_ID = p.Product_ID
+LEFT JOIN dim_customer c ON f.Customer_ID = c.Customer_ID;
+
+-- 7. Final sanity checks & messages
+-- Count rows
+SELECT
+  (SELECT COUNT(*) FROM raw_orders) AS raw_rows,
+  (SELECT COUNT(*) FROM clean_orders) AS clean_rows,
+  (SELECT COUNT(*) FROM fact_orders) AS fact_rows;
+
+SET FOREIGN_KEY_CHECKS = 1;
+
+
