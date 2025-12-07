@@ -88,10 +88,13 @@ The insights support decisions in pricing, inventory planning, customer retentio
 
 Repository Structure
 
-Data 
-Power BI report (.pbix)
-SQL (scripts)
-This README document
+📦 Superstore-PowerBI-Project
+├─ 📁 Power_BI   (dashboard + .pbix file)
+├─ 📁 Data      (raw data)
+├─ 📁 sql   (MySQL queries)
+├─ README.md    (this file)
+
+
 
 How to Use the Report
 
